@@ -1,0 +1,9 @@
+{
+  "name": "agent-dispatcher",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "MCP dispatcher that routes tasks to Kilo, OpenCode, Codex, and Claude agents",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.13.0"
+  }
+}

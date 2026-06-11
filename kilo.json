@@ -1,0 +1,10 @@
+{
+  "$schema": "https://app.kilo.ai/config.json",
+  "mcp": {
+    "agent-dispatcher": {
+      "type": "local",
+      "command": ["node", "/home/dima/Desktop/orchestration/dispatcher.mjs"],
+      "enabled": true
+    }
+  }
+}
