@@ -1,12 +1,17 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { execSync } from 'node:child_process'
+import { execSync, spawn } from 'node:child_process'
 import { mkdir, writeFile, rm } from 'node:fs/promises'
-import { join, sep } from 'node:path'
+import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
+import { fileURLToPath } from 'url'
+import { dirname } from 'path'
 
-import { runAgent, AGENTS, tail, paramsSchema, resetLocks } from './dispatcher.mjs'
+import { runAgent, AGENTS, tail, paramsSchema, resetLocks, running } from './dispatcher.mjs'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const dispatcherPath = join(__dirname, 'dispatcher.mjs')
 
 let baseDir, repoCwd, worktreeCwd, notGitCwd, fixturesBin, worktree2Cwd
 const origPath = process.env.PATH
@@ -40,6 +45,7 @@ before(async () => {
   await writeFile(join(fixturesBin, KILO), [
     '#!/bin/bash',
     'case "$*" in',
+    '  *TRAP_TERM*) trap \'\' TERM; exec sleep 9000 ;;',
     '  *SLEEP_9000*) exec sleep 9000 ;;',
     '  *FAIL_1*) echo "stderr fail" >&2; exit 1 ;;',
     '  *) echo "fake-kilo-ok" ;;',
@@ -156,9 +162,12 @@ describe('runAgent', () => {
     assert.strictEqual(parsed.branch, 'test-wt')
     assert.ok(typeof parsed.duration_s === 'number')
     assert.ok(parsed.duration_s >= 0)
+    assert.strictEqual(parsed.status_short, '(clean)')
     assert.strictEqual(parsed.diffstat, '(no changes)')
     assert.ok(parsed.log_path.includes('logs'))
     assert.ok(parsed.log_path.includes('kilo'))
+    assert.strictEqual(parsed.timed_out, false)
+    assert.strictEqual(parsed.error, null)
     assert.ok(parsed.stdout_tail.includes('fake-kilo-ok'))
   })
 
@@ -167,6 +176,8 @@ describe('runAgent', () => {
     const parsed = JSON.parse(result)
     assert.strictEqual(parsed.agent, 'kilo')
     assert.strictEqual(parsed.exit_code, 1)
+    assert.strictEqual(parsed.timed_out, false)
+    assert.ok(parsed.error === null || parsed.error === 'exit code 1')
     assert.ok(parsed.stderr_tail.includes('stderr fail'))
   })
 
@@ -196,6 +207,7 @@ describe('runAgent', () => {
     const parsed = JSON.parse(result)
     assert.strictEqual(parsed.agent, 'kilo')
     assert.strictEqual(parsed.exit_code, -1)
+    assert.strictEqual(parsed.timed_out, true)
     assert.ok(parsed.duration_s <= 12, `duration ${parsed.duration_s}s exceeds timeout+grace`)
   })
 })
@@ -243,5 +255,54 @@ describe('cwd lock', () => {
     )
 
     await slow.catch(() => {})
+  })
+})
+
+describe('recursion guard', () => {
+  it('refuses to start with AGENT_DISPATCHER_CHILD=1', () => {
+    let stderr = ''
+    try {
+      execSync(`node "${dispatcherPath}"`, {
+        encoding: 'utf8',
+        env: { ...process.env, AGENT_DISPATCHER_CHILD: '1', PATH: process.env.PATH },
+      })
+    } catch (err) {
+      stderr = err.stderr || ''
+    }
+    assert.ok(stderr.includes('AGENT_DISPATCHER_CHILD'))
+  })
+})
+
+describe('tools/list integration', () => {
+  it('returns exactly delegate_kilo and delegate_codex', () => {
+    const output = execSync(
+      `echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | node "${dispatcherPath}"`,
+      { encoding: 'utf8', cwd: __dirname }
+    )
+    const response = JSON.parse(output.trim().split('\n').pop())
+    const names = response.result.tools.map(t => t.name).sort()
+    assert.deepStrictEqual(names, ['delegate_codex', 'delegate_kilo'])
+  })
+})
+
+describe('SIGKILL escalation', () => {
+  it('kills trap-ignoring process with SIGKILL and frees slot', async () => {
+    resetLocks()
+    const result = await runAgent('kilo', 'TRAP_TERM test', worktreeCwd, 2, 10)
+    const parsed = JSON.parse(result)
+    assert.strictEqual(parsed.agent, 'kilo')
+    assert.strictEqual(parsed.exit_code, -1)
+    assert.strictEqual(parsed.timed_out, true)
+    assert.strictEqual(running, 0)
+  })
+})
+
+describe('untracked file', () => {
+  it('detects untracked file in status_short', async () => {
+    await writeFile(join(worktreeCwd, 'newfile.txt'), 'untracked content')
+    const result = await runAgent('kilo', 'test', worktreeCwd, 30, 10)
+    const parsed = JSON.parse(result)
+    assert.ok(parsed.status_short.includes('newfile.txt'))
+    await rm(join(worktreeCwd, 'newfile.txt'), { force: true })
   })
 })

@@ -2,8 +2,9 @@
   "name": "agent-dispatcher",
   "version": "1.0.0",
   "type": "module",
-  "description": "MCP dispatcher that routes tasks to Kilo, OpenCode, Codex, and Claude agents",
+  "description": "MCP dispatcher that delegates tasks to Kilo and Codex agents in git worktrees",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.13.0"
+    "@modelcontextprotocol/sdk": "^1.13.0",
+    "zod": "^3.24.0"
   }
 }

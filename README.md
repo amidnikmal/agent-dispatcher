@@ -41,8 +41,11 @@ JSON-отчёт: { agent, exit_code, duration_s, branch, diffstat, log_path, ...
   "exit_code": 0,
   "duration_s": 12.3,
   "branch": "wt-my-task",
+  "status_short": " M src/auth.ts\n?? newfile.txt",
   "diffstat": "src/auth.ts | 42 ++++\n1 file changed, 42 insertions(+)",
   "log_path": "/path/to/orchestration/logs/kilo-2026-06-11T12-00-00.000Z.log",
+  "timed_out": false,
+  "error": null,
   "stdout_tail": "...",
   "stderr_tail": "..."
 }
@@ -61,10 +64,9 @@ JSON-отчёт: { agent, exit_code, duration_s, branch, diffstat, log_path, ...
 orchestration/
 ├── dispatcher.mjs          # MCP-сервер
 ├── dispatcher.test.mjs     # Тесты (node:test, PATH-фикстуры)
-├── package.json            # deps: @modelcontextprotocol/sdk
-├── kilo.json               # MCP-конфиг для Kilo
+├── package.json            # deps: @modelcontextprotocol/sdk, zod
 ├── .mcp.json               # MCP-конфиг для Claude Code
-├── CLAUDE.md               # Инструкции для Claude Code
+├── CLAUDE.md               # Протокол оркестратора для Claude Code
 ├── logs/                   # Логи агентов
 ├── .gitignore
 └── README.md
@@ -89,26 +91,11 @@ cd /home/dima/Downloads/codex-throne-artifact/scripts/wrappers
 ./install-codex-throne.sh    # → ~/.local/bin/codex-throne
 ```
 
-### Подключение к Kilo
-
-`kilo.json` уже в корне проекта. Kilo автоматически подхватывает его при запуске
-из этой (или дочерней) директории.
-
-```bash
-kilocode mcp list   # должен быть agent-dispatcher
-```
-
 ### Подключение к Claude Code
 
-`.mcp.json` уже в корне проекта. Если нужен глобальный конфиг — секция `mcp` в
-`~/.claude/settings.json`.
+`.mcp.json` уже в корне проекта. Claude Code подхватывает его автоматически.
 
 **Важно:** путь до `dispatcher.mjs` в `.mcp.json` должен быть абсолютным.
-
-### Codex как оркестратор
-
-Codex не поддерживает внешние MCP-серверы. Вариант: запустить диспетчер
-из Kilo или Claude Code для вызова `delegate_codex`.
 
 ## Проверка
 
@@ -136,3 +123,13 @@ tool_name: {
 ```
 
 Тулз `delegate_tool_name` появится автоматически.
+
+## Troubleshooting
+
+### Codex: ошибка 403 от api.openai.com
+
+Проблема решена VPN-обёрткой `codex-throne`. НЕ заменяйте `codex-throne` на `codex` —
+использование голого бинарника `codex` из РФ приведёт к 403 Forbidden от OpenAI API.
+
+`codex-throne` автоматически устанавливает `HTTP_PROXY/HTTPS_PROXY=http://127.0.0.1:2080`
+и проксирует запросы через VPN-туннель.

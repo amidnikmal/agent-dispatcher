@@ -89,9 +89,18 @@ async function getBranch(cwd) {
   }
 }
 
+async function getStatusShort(cwd) {
+  try {
+    const { stdout } = await execFileP('git', ['status', '--short'], { cwd })
+    return stdout.trim() || '(clean)'
+  } catch {
+    return '(error)'
+  }
+}
+
 async function getDiffstat(cwd) {
   try {
-    const { stdout } = await execFileP('git', ['diff', '--stat'], { cwd })
+    const { stdout } = await execFileP('git', ['diff', 'HEAD', '--stat'], { cwd })
     return stdout.trim() || '(no changes)'
   } catch {
     return '(no changes)'
@@ -109,13 +118,14 @@ function spawnP(bin, args, { cwd, timeoutSec }) {
     let stdout = ''
     let stderr = ''
     let timedOut = false
+    let closed = false
 
     const killTimer = setTimeout(() => {
       timedOut = true
       elog(`SIGTERM → ${bin} (pid ${child.pid}) after ${timeoutSec}s`)
       child.kill('SIGTERM')
       setTimeout(() => {
-        if (!child.killed) {
+        if (!closed) {
           elog(`SIGKILL → ${bin} (pid ${child.pid}) after ${timeoutSec + 10}s`)
           child.kill('SIGKILL')
         }
@@ -126,6 +136,7 @@ function spawnP(bin, args, { cwd, timeoutSec }) {
     child.stderr.on('data', (d) => { stderr += d })
 
     child.on('close', (code, signal) => {
+      closed = true
       clearTimeout(killTimer)
       const killed = timedOut || signal === 'SIGTERM' || signal === 'SIGKILL'
       if (killed) {
@@ -172,6 +183,9 @@ export const AGENTS = {
     bin: 'kilocode',
     args: (prompt) => ['run', prompt],
   },
+  // codex-throne is a VPN wrapper over codex (not a different binary).
+  // DO NOT replace 'codex-throne' with 'codex' — doing so will cause
+  // 403 errors from api.openai.com when running outside US.
   codex: {
     label: 'Codex',
     bin: 'codex-throne',
@@ -208,13 +222,11 @@ export async function runAgent(agentKey, prompt, cwd, timeoutSec, logTailLines) 
   const start = Date.now()
 
   try {
-    const branchPromise = getBranch(cwd)
-    const spawnPromise = spawnP(agent.bin, agent.args(prompt), { cwd, timeoutSec })
-    const branch = await branchPromise
-    const { stdout, stderr } = await spawnPromise
-    const end = Date.now()
-    const durationMs = end - start
+    const branch = await getBranch(cwd)
+    const { stdout, stderr } = await spawnP(agent.bin, agent.args(prompt), { cwd, timeoutSec })
+    const durationMs = Date.now() - start
 
+    const statusShortPost = await getStatusShort(cwd)
     const diffstatPost = await getDiffstat(cwd)
 
     await mkdir(LOG_DIR, { recursive: true })
@@ -237,28 +249,33 @@ export async function runAgent(agentKey, prompt, cwd, timeoutSec, logTailLines) 
       exit_code: 0,
       duration_s: Math.round(durationMs / 100) / 10,
       branch,
+      status_short: statusShortPost,
       diffstat: diffstatPost,
       log_path: logFile,
+      timed_out: false,
+      error: null,
       stdout_tail: tail(stdout, logTailLines),
       stderr_tail: tail(stderr, logTailLines),
     })
   } catch (err) {
-    const end = Date.now()
+    const duration_s = Math.round((Date.now() - start) / 100) / 10
 
     let exitCode = -1
-    let killed = false
-    let duration = timeoutSec
+    let timedOut = false
+    let errorMessage = null
 
     if (err.killed) {
-      killed = true
+      timedOut = true
     } else if (err.message && err.message.startsWith('exit code ')) {
       exitCode = parseInt(err.message.split(' ')[2], 10)
-      duration = Math.round((end - start) / 100) / 10
+    } else {
+      errorMessage = err.message
     }
 
     const stdout = err.stdout || ''
     const stderr = err.stderr || ''
     const branch = await getBranch(cwd)
+    const statusShortPost = await getStatusShort(cwd)
     const diffstatPost = await getDiffstat(cwd)
 
     await mkdir(LOG_DIR, { recursive: true })
@@ -268,8 +285,9 @@ export async function runAgent(agentKey, prompt, cwd, timeoutSec, logTailLines) 
       `cwd: ${cwd}`,
       `timeout_sec: ${timeoutSec}`,
       `branch: ${branch}`,
-      `exit_code: ${killed ? 'timeout' : exitCode}`,
-      `killed: ${killed}`,
+      `exit_code: ${timedOut ? 'timeout' : exitCode}`,
+      `timed_out: ${timedOut}`,
+      `error: ${errorMessage}`,
       `--- stdout ---`,
       stdout || '(empty)',
       `--- stderr ---`,
@@ -278,11 +296,14 @@ export async function runAgent(agentKey, prompt, cwd, timeoutSec, logTailLines) 
 
     return JSON.stringify({
       agent: agentKey,
-      exit_code: killed ? -1 : exitCode,
-      duration_s: killed ? timeoutSec : duration,
+      exit_code: timedOut ? -1 : exitCode,
+      duration_s,
       branch,
+      status_short: statusShortPost,
       diffstat: diffstatPost,
       log_path: logFile,
+      timed_out: timedOut,
+      error: errorMessage,
       stdout_tail: tail(stdout, logTailLines),
       stderr_tail: tail(stderr, logTailLines),
     })

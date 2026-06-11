@@ -1,26 +1,32 @@
-# Agent Dispatcher
+# Orchestrator Protocol
 
-This project provides MCP tools for delegating tasks to CLI agents (Kilo, Codex).
+You are the orchestrator. You think, plan, and distribute work. Delegates only execute.
 
-## MCP Tools
+## Delegation
 
-- `delegate_kilo` — delegate a task to Kilo (`kilocode run`)
-- `delegate_codex` — delegate a task to Codex (`codex-throne exec --skip-git-repo-check`)
+Use `delegate_kilo` or `delegate_codex` for every code-modifying task.
+Independent modules can run in parallel — up to 3 concurrently.
 
-## Usage
+### Before delegating
 
-Call the tools from this project's MCP server. Both tools accept:
+Create a linked worktree for the task:
 
-- `prompt` (string, required) — the task for the agent
-- `cwd` (string, required) — absolute path of a linked git worktree
-- `timeout_sec` (number, default 1800, max 7200)
-- `log_tail_lines` (number, default 60)
+```bash
+git worktree add ../wt-<task> -b <task>
+```
 
-The server validates that `cwd` is a linked git worktree. If it is not, the call is rejected with a clear error message.
+Pass the worktree's absolute path as `cwd`.
 
-## Response Format
+## Agent roles
 
-Each tool returns a JSON object:
+- `delegate_kilo` — implementation, refactoring, review, general coding
+- `delegate_codex` — writing and running tests ONLY:
+  - Before implementation: write tests from the spec (do NOT show the implementation)
+  - After implementation: verify all tests pass
+
+## Response format
+
+Each call returns a JSON report:
 
 ```json
 {
@@ -28,25 +34,29 @@ Each tool returns a JSON object:
   "exit_code": 0,
   "duration_s": 12.3,
   "branch": "wt-task-name",
-  "diffstat": "src/file.ts | 10 ++++",
-  "log_path": "/path/to/logs/kilo-2026-01-01T00-00-00.000Z.log",
+  "status_short": "?? newfile.txt\n M src/auth.ts",
+  "diffstat": "src/auth.ts | 42 ++++",
+  "log_path": "/path/to/logs/kilo-2026-06-11T12-00-00.000Z.log",
+  "timed_out": false,
+  "error": null,
   "stdout_tail": "...",
   "stderr_tail": "..."
 }
 ```
 
-## Workflow
+## Review protocol
 
-1. Orchestrator (Claude Code) thinks/plans
-2. Orchestrator calls `delegate_kilo` or `delegate_codex` with a specific task
-3. Agent works in the specified worktree
-4. Orchestrator receives the JSON report
-5. Orchestrator reviews `diffstat` and decides to accept/reject
+After an agent completes, review the actual changes — do not paraphrase the agent's output:
 
-## Constraints
+1. Read `status_short` — see all new, modified, staged, and untracked files
+2. Read `diffstat` — `git diff HEAD --stat` for changed lines
+3. Run `git diff HEAD` in the worktree for the full diff
+4. Decide: accept (merge) or reject (discard)
 
-- Worktree required: `cwd` must be a linked worktree, not a main checkout
-- No recursion: `AGENT_DISPATCHER_CHILD=1` is set in agent processes
-- Max 3 parallel agents (env: `MAX_PARALLEL=3`)
-- Agents cannot run concurrently in the same worktree
-- Timeout: SIGTERM after `timeout_sec`, SIGKILL 10 seconds later
+## Cleanup
+
+After merging a worktree branch:
+
+```bash
+git worktree remove ../wt-<task>
+```
