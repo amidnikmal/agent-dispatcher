@@ -1,69 +1,76 @@
 # Agent Dispatcher — MCP-диспетчер для оркестрации AI-агентов
 
-MCP-сервер, который позволяет одному AI-агенту (Claude Code, Kilo, Codex) делегировать
-задачи другим агентам. Работает как хаб: принимает tool-call от ассистента-оркестратора,
-запускает целевой CLI и возвращает результат обратно.
+MCP-сервер для делегирования задач CLI-агентам (Kilo, Codex). Принимает tool-call
+от оркестратора (Claude Code/Kilo), запускает агента в git worktree и возвращает
+структурированный JSON-отчёт.
 
 ## Как это работает
 
 ```
-┌──────────────────────────────────────────────────────┐
-│  Оркестратор (Claude Code / Kilo / Codex)            │
-│                                                      │
-│  «Напиши тесты для src/auth.ts»                      │
-│     │                                                │
-│     ▼  MCP tool call                                 │
-│  delegate_kilo({ prompt, cwd })                      │
-│     │                                                │
-│     ▼                                                │
-│  ┌─────────────────────────────────┐                 │
-│  │  dispatcher.mjs (этот проект)   │                 │
-│  │                                 │                 │
-│  │  spawn("kilocode", ["run", ...])│                 │
-│  │  spawn("codex",    ["exec", ...])│                │
-│  │  spawn("claude",   ["-p", ...]) │                 │
-│  └──────────────┬──────────────────┘                 │
-│     │                                                │
-│     ▼  stdout + stderr                               │
-│  Возврат результата оркестратору                     │
-└──────────────────────────────────────────────────────┘
+Оркестратор (Claude Code / Kilo)
+   │  MCP tool call: delegate_kilo({ prompt, cwd, ... })
+   ▼
+dispatch.mjs
+   │  spawn("kilocode", ["run", prompt])
+   │  spawn("codex-throne", ["exec", "--skip-git-repo-check", prompt])
+   ▼
+JSON-отчёт: { agent, exit_code, duration_s, branch, diffstat, log_path, ... }
 ```
-
-Оркестратор «видит» три тулза (`delegate_kilo`, `delegate_codex`, `delegate_claude`)
-и вызывает их точно так же, как любые другие MCP-инструменты.
 
 ## Доступные тулзы
 
-| Тулз | Команда | Флаги |
+| Тулз | CLI | Команда |
 |---|---|---|
-| `delegate_kilo` | `kilocode run "<prompt>"` | — |
-| `delegate_codex` | `codex exec "<prompt>"` | `--skip-git-repo-check` |
-| `delegate_claude` | `claude -p "<prompt>"` | `--dangerously-skip-permissions` |
+| `delegate_kilo` | `kilocode` | `kilocode run "<prompt>"` |
+| `delegate_codex` | `codex-throne` | `codex-throne exec --skip-git-repo-check "<prompt>"` |
 
-Все три принимают одинаковые параметры:
-- `prompt` (string, обязательный) — задача для агента
-- `cwd` (string, опциональный) — рабочая директория (по умолчанию — CWD процесса)
+Оба принимают одинаковые параметры:
 
-Таймаут выполнения — 5 минут. Буфер вывода — без ограничений (стримится).
+| Параметр | Тип | Описание |
+|---|---|---|
+| `prompt` | string | Задача для агента |
+| `cwd` | string | Абсолютный путь к git worktree (обязательно worktree, не main) |
+| `timeout_sec` | number | Таймаут (default 1800, max 7200) |
+| `log_tail_lines` | number | Сколько последних строк логов вернуть (default 60) |
+
+### Ответ
+
+```json
+{
+  "agent": "kilo",
+  "exit_code": 0,
+  "duration_s": 12.3,
+  "branch": "wt-my-task",
+  "diffstat": "src/auth.ts | 42 ++++\n1 file changed, 42 insertions(+)",
+  "log_path": "/path/to/orchestration/logs/kilo-2026-06-11T12-00-00.000Z.log",
+  "stdout_tail": "...",
+  "stderr_tail": "..."
+}
+```
+
+## Ограничения
+
+- **Worktree**: `cwd` обязан быть linked git worktree. `git rev-parse --absolute-git-dir` ≠ `--git-common-dir`.
+- **Параллелизм**: `MAX_PARALLEL=3` (env). Lock по cwd.
+- **Рекурсия**: `AGENT_DISPATCHER_CHILD=1` запрещает запуск диспетчера внутри агента.
+- **Таймаут**: SIGTERM через `timeout_sec`, +10 сек → SIGKILL.
 
 ## Структура проекта
 
 ```
 orchestration/
-├── dispatcher.mjs    # MCP-сервер (основной файл)
-├── package.json      # Зависимости (только @modelcontextprotocol/sdk)
-├── kilo.json         # MCP-конфиг для Kilo
+├── dispatcher.mjs          # MCP-сервер
+├── dispatcher.test.mjs     # Тесты (node:test, PATH-фикстуры)
+├── package.json            # deps: @modelcontextprotocol/sdk
+├── kilo.json               # MCP-конфиг для Kilo
+├── .mcp.json               # MCP-конфиг для Claude Code
+├── CLAUDE.md               # Инструкции для Claude Code
+├── logs/                   # Логи агентов
 ├── .gitignore
-└── README.md         # Этот файл
+└── README.md
 ```
 
-Настройка для Claude Code — в отдельном файле `~/.claude/settings.json` (см. ниже).
-
----
-
 ## Установка
-
-### 1. Клонирование и зависимости
 
 ```bash
 git clone <repo-url> orchestration
@@ -71,164 +78,61 @@ cd orchestration
 npm install
 ```
 
-### 2. Подключение к Kilo
+### Codex: VPN-обёртка
 
-Файл `kilo.json` уже лежит в корне проекта. Kilo автоматически подхватывает его
-при запуске из этой директории (или любой дочерней). Если нужно глобально —
-скопируй секцию `mcp` в глобальный `~/.config/kilo/kilo.json`.
-
-Проверка:
-```bash
-kilocode mcp list
-# Должен появиться agent-dispatcher
-```
-
-### 3. Подключение к Claude Code
-
-Добавь в `~/.claude/settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "agent-dispatcher": {
-      "type": "stdio",
-      "command": "node",
-      "args": ["/absolute/path/to/orchestration/dispatcher.mjs"]
-    }
-  }
-}
-```
-
-**Важно:** путь до `dispatcher.mjs` должен быть абсолютным. Замени
-`/absolute/path/to/orchestration` на реальный путь (например,
-`/home/dima/Desktop/orchestration/dispatcher.mjs`).
-
-После добавления — перезапусти Claude Code.
-
-### 4. Подключение к Codex
-
-Codex пока не поддерживает внешние MCP-серверы в конфиге напрямую.
-Варианты обхода:
-- Запустить Codex как MCP-сервер (`codex mcp-server`) и подключить его к Kilo/Claude
-  как один из инструментов диспетчера (а не как оркестратора)
-- Использовать диспетчер из Kilo или Claude Code для вызова `delegate_codex`
-
----
-
-## Использование
-
-### В Claude Code
-
-Просто попроси Клода делегировать задачу — он сам вызовет нужный тулз:
-
-> Напиши unit-тесты для src/auth.ts. Используй delegate_kilo.
-
-Или явно:
-
-> Вызови delegate_codex с задачей «отрефактори src/database.ts, разбей на модули».
-
-### В Kilo
-
-Аналогично — Kilo видит тулзы и сам решает, когда их вызывать:
-
-> Проверь код проекта, делегируй тестирование через delegate_codex.
-
-### В Codex (как подчинённый агент)
-
-Codex запускается через `delegate_codex` из Kilo или Claude Code:
-
-```
-delegate_codex({
-  prompt: "напиши миграцию для добавления таблицы users",
-  cwd: "/home/dima/my-project"
-})
-```
-
----
-
-## Ручная проверка
-
-Отправь JSON-RPC запрос через stdin:
+Codex требует прокси (VPN) для доступа к API OpenAI. Используется обёртка
+`codex-throne`, которая устанавливается из
+`/home/dima/Downloads/codex-throne-artifact/scripts/wrappers/`:
 
 ```bash
-# Список тулзов
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
-  | node dispatcher.mjs
-
-# Вызов агента
-echo '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"delegate_kilo","arguments":{"prompt":"say hello"}}}' \
-  | node dispatcher.mjs
+cd /home/dima/Downloads/codex-throne-artifact/scripts/wrappers
+./install-codex-throne.sh    # → ~/.local/bin/codex-throne
 ```
 
----
+### Подключение к Kilo
 
-## Диагностика
+`kilo.json` уже в корне проекта. Kilo автоматически подхватывает его при запуске
+из этой (или дочерней) директории.
 
-### Агент не отвечает / ошибка аутентификации
-
-**Claude Code** — ошибка `403 Request not allowed`:
 ```bash
-claude login          # перелогиниться
-claude -p "test" < /dev/null   # проверить неинтерактивный режим
+kilocode mcp list   # должен быть agent-dispatcher
 ```
 
-**Codex** — ошибка `403 Forbidden`:
+### Подключение к Claude Code
+
+`.mcp.json` уже в корне проекта. Если нужен глобальный конфиг — секция `mcp` в
+`~/.claude/settings.json`.
+
+**Важно:** путь до `dispatcher.mjs` в `.mcp.json` должен быть абсолютным.
+
+### Codex как оркестратор
+
+Codex не поддерживает внешние MCP-серверы. Вариант: запустить диспетчер
+из Kilo или Claude Code для вызова `delegate_codex`.
+
+## Проверка
+
 ```bash
-codex login                    # перелогиниться
-codex exec "test"              # проверить неинтерактивный режим
+node --check dispatcher.mjs     # синтаксис
+node --test                      # тесты
 ```
-Причина чаще всего — IP-блокировка (VPN, геолокация) или просроченный
-OAuth-токен.
 
-**Kilo** — должен работать из коробки, если настроен хотя бы один провайдер.
+Ручной вызов:
+
 ```bash
-kilocode run "test"            # проверить
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | node dispatcher.mjs
 ```
-
-### Таймаут (5 минут)
-
-Если агент не успел ответить за 5 минут — диспетчер возвращает
-`[TIMEOUT]`. При необходимости увеличь таймаут в `dispatcher.mjs`:
-строка `timeout: 300_000` (миллисекунды).
-
-### Не появляются тулзы в Claude Code
-
-1. Проверь, что путь до `dispatcher.mjs` абсолютный и файл существует
-2. Проверь синтаксис: `node --check dispatcher.mjs`
-3. Перезапусти Claude Code
-4. Посмотри логи Claude Code: `~/.claude/logs/`
-
----
 
 ## Добавление нового агента
 
-1. Добавь запись в объект `AGENTS` в `dispatcher.mjs`:
+Добавить в `AGENTS` в `dispatcher.mjs`:
 
 ```js
-new_agent: {
-  label: "MyAgent",
-  bin: "my-agent-cli",
-  args: (prompt) => ["--non-interactive", prompt],
+tool_name: {
+  label: 'Tool',
+  bin: 'cli-binary',
+  args: (prompt) => ['--flag', prompt],
 },
 ```
 
-2. Тулз `delegate_new_agent` появится автоматически при перезапуске.
-
-Правила для CLI-инструментов:
-- Должны принимать prompt как аргумент командной строки
-- Должны работать в неинтерактивном режиме (без TTY)
-- Не должны требовать stdin (диспетчер передаёт `/dev/null`)
-- Должны писать результат в stdout
-
----
-
-## Примечания
-
-- Диспетчер общается с оркестратором через **stdio** (JSON-RPC), поэтому
-  не занимает сетевой порт
-- Все переменные окружения родительского процесса наследуются (включая
-  `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` и т.д.)
-- Коды ошибок и stderr целевых агентов возвращаются оркестратору как
-  часть текстового ответа — он может прочитать и скорректировать задачу
-- Диспетчер **не хранит историю**, **не кеширует результаты** —
-  каждый вызов запускает свежий процесс
+Тулз `delegate_tool_name` появится автоматически.

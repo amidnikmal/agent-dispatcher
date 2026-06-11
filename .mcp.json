@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "agent-dispatcher": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/home/dima/Desktop/orchestration/dispatcher.mjs"]
+    }
+  }
+}

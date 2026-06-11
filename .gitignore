@@ -1,5 +1,7 @@
 node_modules/
+logs/
 *.log
+prompt-for-analysis.txt
 .DS_Store
 *.swp
 *.swo
