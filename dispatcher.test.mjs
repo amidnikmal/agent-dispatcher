@@ -1,210 +1,247 @@
-import { describe, it, afterEach } from "node:test";
-import assert from "node:assert";
-import { spawnP, runAgent, AGENTS, paramsSchema, buildToolDescription } from "./dispatcher.mjs";
+import { describe, it, before, after } from 'node:test'
+import assert from 'node:assert/strict'
+import { execSync } from 'node:child_process'
+import { mkdir, writeFile, rm } from 'node:fs/promises'
+import { join, sep } from 'node:path'
+import { tmpdir } from 'node:os'
+import { randomUUID } from 'node:crypto'
 
-function makeFakeSpawn(stdoutData, stderrData, exitCode) {
-  return async (_bin, _args, _opts) => {
-    if (exitCode !== 0) {
-      const err = new Error(`exit code ${exitCode}`);
-      err.stdout = stdoutData;
-      err.stderr = stderrData;
-      throw err;
-    }
-    return { stdout: stdoutData, stderr: stderrData };
-  };
-}
+import { runAgent, AGENTS, tail, paramsSchema, resetLocks } from './dispatcher.mjs'
 
-function makeErrorSpawn(message) {
-  return async () => {
-    throw Object.assign(new Error(message), { stdout: "", stderr: "" });
-  };
-}
+let baseDir, repoCwd, worktreeCwd, notGitCwd, fixturesBin, worktree2Cwd
+const origPath = process.env.PATH
+const origMaxParallel = process.env.MAX_PARALLEL
+const KILO = 'kilocode'
+const CODEX = 'codex-throne'
 
-function makeTimeoutSpawn(stdoutData) {
-  return async () => {
-    const err = new Error("killed");
-    err.killed = true;
-    err.signal = "SIGTERM";
-    err.stdout = stdoutData;
-    err.stderr = "";
-    throw err;
-  };
-}
+before(async () => {
+  baseDir = join(tmpdir(), `dispatcher-test-${randomUUID()}`)
+  await mkdir(baseDir, { recursive: true })
 
-describe("spawnP integration (real)", () => {
-  it("rejects with ENOENT for nonexistent binary", async (t) => {
-    await assert.rejects(
-      () => spawnP("nonexistent-binary-12345", [], {}),
-      (err) => err.code === "ENOENT"
-    );
-  });
+  repoCwd = join(baseDir, 'repo')
+  execSync(`git init "${repoCwd}"`, { encoding: 'utf8' })
+  execSync(`git -C "${repoCwd}" commit --allow-empty -m init`, {
+    encoding: 'utf8',
+    env: { ...process.env, GIT_AUTHOR_NAME: 'test', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 'test', GIT_COMMITTER_EMAIL: 't@t' },
+  })
 
-  it("resolves with stdout for echo", async (t) => {
-    const { stdout } = await spawnP("echo", ["hello-world-test"], {});
-    assert.match(stdout, /hello-world-test/);
-  });
-});
+  worktreeCwd = join(baseDir, 'wt')
+  execSync(`git -C "${repoCwd}" worktree add "${worktreeCwd}" -b test-wt`, { encoding: 'utf8' })
 
-describe("runAgent", () => {
-  it("throws on unknown agent key", async (t) => {
-    await assert.rejects(
-      () => runAgent("nonexistent", "test"),
-      /Unknown agent: nonexistent/
-    );
-  });
+  worktree2Cwd = join(baseDir, 'wt2')
+  execSync(`git -C "${repoCwd}" worktree add "${worktree2Cwd}" -b test-wt2`, { encoding: 'utf8' })
 
-  it("returns stdout on success (exit 0)", async (t) => {
-    const fake = makeFakeSpawn("function add(a,b) { return a+b; }", "", 0);
-    const result = await runAgent("kilo", "write an add function", undefined, fake);
-    assert.ok(result.includes("function add(a,b)"));
-    assert.ok(!result.includes("[stderr]"));
-    assert.ok(!result.includes("[ERROR]"));
-  });
+  notGitCwd = join(baseDir, 'not-git')
+  await mkdir(notGitCwd)
 
-  it("appends stderr on success when present", async (t) => {
-    const fake = makeFakeSpawn("output", "deprecation warning", 0);
-    const result = await runAgent("codex", "do something", undefined, fake);
-    assert.match(result, /output/);
-    assert.match(result, /\[stderr\]/);
-    assert.match(result, /deprecation warning/);
-  });
+  fixturesBin = join(baseDir, 'bin')
+  await mkdir(fixturesBin)
 
-  it('shows "(no output)" when stdout is empty', async (t) => {
-    const fake = makeFakeSpawn("", "", 0);
-    const result = await runAgent("kilo", "test", undefined, fake);
-    assert.strictEqual(result, "(no output)");
-  });
+  await writeFile(join(fixturesBin, KILO), [
+    '#!/bin/bash',
+    'case "$*" in',
+    '  *SLEEP_9000*) exec sleep 9000 ;;',
+    '  *FAIL_1*) echo "stderr fail" >&2; exit 1 ;;',
+    '  *) echo "fake-kilo-ok" ;;',
+    'esac',
+    'exit 0',
+  ].join('\n'))
+  execSync(`chmod +x "${join(fixturesBin, KILO)}"`)
 
-  it("returns [ERROR] format on non-zero exit", async (t) => {
-    const fake = makeFakeSpawn("partial output", "fatal: something", 1);
-    const result = await runAgent("kilo", "test", undefined, fake);
-    assert.match(result, /\[ERROR\] Kilo: exit code 1/);
-    assert.match(result, /\[stdout\]/);
-    assert.match(result, /partial output/);
-    assert.match(result, /\[stderr\]/);
-    assert.match(result, /fatal: something/);
-  });
+  await writeFile(join(fixturesBin, CODEX), [
+    '#!/bin/bash',
+    'case "$*" in',
+    '  *SLEEP_9000*) exec sleep 9000 ;;',
+    '  *FAIL_2*) echo "codex-stderr" >&2; exit 2 ;;',
+    '  *) echo "fake-codex-ok" ;;',
+    'esac',
+    'exit 0',
+  ].join('\n'))
+  execSync(`chmod +x "${join(fixturesBin, CODEX)}"`)
 
-  it("returns [TIMEOUT] when killed by SIGTERM", async (t) => {
-    const fake = makeTimeoutSpawn("started...");
-    const result = await runAgent("codex", "long task", undefined, fake);
-    assert.match(result, /\[TIMEOUT\] Codex took longer than 5 minutes\./);
-  });
+  process.env.PATH = `${fixturesBin}:${origPath}`
+  process.env.MAX_PARALLEL = '3'
+})
 
-  it("uses agent label in error messages, not bin name", async (t) => {
-    const fake = makeFakeSpawn("", "broken", 2);
-    const result = await runAgent("claude", "test", undefined, fake);
-    assert.match(result, /\[ERROR\] Claude Code:/);
-    assert.ok(!result.includes("[ERROR] claude:"));
-  });
+after(async () => {
+  process.env.PATH = origPath
+  if (origMaxParallel !== undefined) {
+    process.env.MAX_PARALLEL = origMaxParallel
+  } else {
+    delete process.env.MAX_PARALLEL
+  }
+  await rm(baseDir, { recursive: true, force: true })
+})
 
-  it("passes cwd and timeout to _spawn", async (t) => {
-    let captured = null;
-    const fake = async (_bin, _args, opts) => {
-      captured = opts;
-      return { stdout: "ok", stderr: "" };
-    };
-    await runAgent("kilo", "test", "/custom/cwd", fake);
-    assert.strictEqual(captured.cwd, "/custom/cwd");
-    assert.strictEqual(captured.timeout, 300_000);
-  });
+describe('AGENTS registry', () => {
+  it('has exactly kilo and codex', () => {
+    const keys = Object.keys(AGENTS).sort()
+    assert.deepStrictEqual(keys, ['codex', 'kilo'])
+  })
 
-  it("defaults cwd to process.cwd() when not provided", async (t) => {
-    let captured = null;
-    const fake = async (_bin, _args, opts) => {
-      captured = opts;
-      return { stdout: "ok", stderr: "" };
-    };
-    await runAgent("kilo", "test", undefined, fake);
-    assert.strictEqual(captured.cwd, process.cwd());
-  });
-});
+  it('codex uses codex-throne binary', () => {
+    assert.strictEqual(AGENTS.codex.bin, CODEX)
+  })
 
-describe("AGENTS registry", () => {
-  it("has exactly kilo, codex, claude", () => {
-    const keys = Object.keys(AGENTS).sort();
-    assert.deepStrictEqual(keys, ["claude", "codex", "kilo"]);
-  });
+  it('codex uses exec with --skip-git-repo-check', () => {
+    const args = AGENTS.codex.args('test')
+    assert.ok(args.includes('exec'))
+    assert.ok(args.includes('--skip-git-repo-check'))
+  })
 
-  it("each agent has label, bin, args function", () => {
+  it('kilo uses kilocode binary with run subcommand', () => {
+    assert.strictEqual(AGENTS.kilo.bin, KILO)
+    assert.deepStrictEqual(AGENTS.kilo.args('test'), ['run', 'test'])
+  })
+
+  it('each agent has label, bin, args function', () => {
     for (const [key, agent] of Object.entries(AGENTS)) {
-      assert.strictEqual(typeof agent.label, "string", `${key}: label`);
-      assert.strictEqual(typeof agent.bin, "string", `${key}: bin`);
-      assert.strictEqual(typeof agent.args, "function", `${key}: args`);
-      const argv = agent.args("test prompt");
-      assert.ok(Array.isArray(argv), `${key}: args returns array`);
-      assert.ok(argv.length >= 2, `${key}: at least 2 args`);
-      assert.ok(argv.includes("test prompt"), `${key}: prompt passed`);
+      assert.strictEqual(typeof agent.label, 'string', `${key}: label`)
+      assert.strictEqual(typeof agent.bin, 'string', `${key}: bin`)
+      assert.strictEqual(typeof agent.args, 'function', `${key}: args`)
+      const argv = agent.args('prompt')
+      assert.ok(Array.isArray(argv), `${key}: args returns array`)
+      assert.ok(argv.includes('prompt'), `${key}: prompt passed`)
     }
-  });
+  })
+})
 
-  it("kilo uses `run` subcommand", () => {
-    assert.deepStrictEqual(AGENTS.kilo.args("hello"), ["run", "hello"]);
-  });
+describe('tail() helper', () => {
+  it('returns last N lines', () => {
+    assert.strictEqual(tail('a\nb\nc\nd\ne', 2), 'd\ne')
+  })
 
-  it("codex uses `exec` subcommand with --skip-git-repo-check", () => {
-    const args = AGENTS.codex.args("hello");
-    assert.strictEqual(args[0], "exec");
-    assert.ok(args.includes("--skip-git-repo-check"));
-  });
+  it('returns full text when fewer lines than N', () => {
+    assert.strictEqual(tail('a\nb', 10), 'a\nb')
+  })
 
-  it("claude uses -p with --dangerously-skip-permissions", () => {
-    const args = AGENTS.claude.args("hello");
-    assert.strictEqual(args[0], "-p");
-    assert.ok(args.includes("--dangerously-skip-permissions"));
-  });
-});
+  it('returns empty for empty input', () => {
+    assert.strictEqual(tail('', 5), '')
+  })
+})
 
-describe("buildToolDescription", () => {
-  it("includes label and bin in description", () => {
-    const desc = buildToolDescription("MyLabel", "mybin");
-    assert.match(desc, /MyLabel/);
-    assert.match(desc, /mybin/);
-  });
-});
+describe('paramsSchema', () => {
+  it('has prompt, cwd, timeout_sec, log_tail_lines keys', () => {
+    const keys = Object.keys(paramsSchema)
+    assert.ok(keys.includes('prompt'))
+    assert.ok(keys.includes('cwd'))
+    assert.ok(keys.includes('timeout_sec'))
+    assert.ok(keys.includes('log_tail_lines'))
+  })
 
-describe("paramsSchema", () => {
-  it("has prompt and cwd keys", () => {
-    const keys = Object.keys(paramsSchema);
-    assert.ok(keys.includes("prompt"));
-    assert.ok(keys.includes("cwd"));
-  });
-});
+  it('timeout_sec has default 1800 via Zod', () => {
+    const result = paramsSchema.timeout_sec.safeParse(undefined)
+    assert.strictEqual(result.success, true)
+    assert.strictEqual(result.data, 1800)
+  })
 
-describe("MCP protocol (integration)", () => {
-  it("tools/list returns 3 tools via stdio", async (t) => {
-    const { spawn } = await import("child_process");
-    const child = spawn("node", ["dispatcher.mjs"], {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+  it('timeout_sec rejects value above 7200', () => {
+    const result = paramsSchema.timeout_sec.safeParse(7201)
+    assert.strictEqual(result.success, false)
+  })
 
-    const request = JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/list",
-      params: {},
-    }) + "\n";
+  it('log_tail_lines has default 60 via Zod', () => {
+    const result = paramsSchema.log_tail_lines.safeParse(undefined)
+    assert.strictEqual(result.success, true)
+    assert.strictEqual(result.data, 60)
+  })
+})
 
-    child.stdin.write(request);
-    child.stdin.end();
+describe('runAgent', () => {
+  it('succeeds in a worktree and returns valid JSON report', async () => {
+    const result = await runAgent('kilo', 'test prompt', worktreeCwd, 30, 10)
+    const parsed = JSON.parse(result)
+    assert.strictEqual(parsed.agent, 'kilo')
+    assert.strictEqual(parsed.exit_code, 0)
+    assert.strictEqual(parsed.branch, 'test-wt')
+    assert.ok(typeof parsed.duration_s === 'number')
+    assert.ok(parsed.duration_s >= 0)
+    assert.strictEqual(parsed.diffstat, '(no changes)')
+    assert.ok(parsed.log_path.includes('logs'))
+    assert.ok(parsed.log_path.includes('kilo'))
+    assert.ok(parsed.stdout_tail.includes('fake-kilo-ok'))
+  })
 
-    let output = "";
-    for await (const chunk of child.stdout) {
-      output += chunk;
-    }
+  it('returns error exit_code when agent fails', async () => {
+    const result = await runAgent('kilo', 'FAIL_1 test', worktreeCwd, 30, 10)
+    const parsed = JSON.parse(result)
+    assert.strictEqual(parsed.agent, 'kilo')
+    assert.strictEqual(parsed.exit_code, 1)
+    assert.ok(parsed.stderr_tail.includes('stderr fail'))
+  })
 
-    child.kill();
+  it('rejects call with nonexistent agent', async () => {
+    await assert.rejects(
+      () => runAgent('nonexistent', 'test', worktreeCwd, 30, 10),
+      /Unknown agent: nonexistent/
+    )
+  })
 
-    const response = JSON.parse(output.trim().split("\n").pop());
-    assert.strictEqual(response.jsonrpc, "2.0");
-    assert.strictEqual(response.id, 1);
-    assert.ok(Array.isArray(response.result.tools));
-    assert.strictEqual(response.result.tools.length, 3);
-    const names = response.result.tools.map((t) => t.name).sort();
-    assert.deepStrictEqual(names, [
-      "delegate_claude",
-      "delegate_codex",
-      "delegate_kilo",
-    ]);
-  });
-});
+  it('rejects non-git cwd', async () => {
+    await assert.rejects(
+      () => runAgent('kilo', 'test', notGitCwd, 30, 10),
+      /is not a git worktree/
+    )
+  })
+
+  it('rejects main checkout as cwd', async () => {
+    await assert.rejects(
+      () => runAgent('kilo', 'test', repoCwd, 30, 10),
+      /is the main checkout/
+    )
+  })
+
+  it('detects timeout and returns exit_code -1', async () => {
+    const result = await runAgent('kilo', 'SLEEP_9000 test', worktreeCwd, 2, 10)
+    const parsed = JSON.parse(result)
+    assert.strictEqual(parsed.agent, 'kilo')
+    assert.strictEqual(parsed.exit_code, -1)
+    assert.ok(parsed.duration_s <= 12, `duration ${parsed.duration_s}s exceeds timeout+grace`)
+  })
+})
+
+describe('concurrency limits', () => {
+  before(() => {
+    process.env.MAX_PARALLEL = '1'
+    resetLocks()
+  })
+
+  after(() => {
+    process.env.MAX_PARALLEL = '3'
+  })
+
+  it('rejects when MAX_PARALLEL is exceeded', async () => {
+    const slow = runAgent('kilo', 'SLEEP_9000 long', worktreeCwd, 1, 10)
+    await new Promise(r => setTimeout(r, 500))
+
+    await assert.rejects(
+      () => runAgent('codex', 'test', worktree2Cwd, 10, 10),
+      /MAX_PARALLEL/
+    )
+
+    await slow.catch(() => {})
+  })
+})
+
+describe('cwd lock', () => {
+  before(() => {
+    process.env.MAX_PARALLEL = '3'
+    resetLocks()
+  })
+
+  after(() => {
+    process.env.MAX_PARALLEL = '3'
+  })
+
+  it('rejects when same cwd is already used by another agent', async () => {
+    const slow = runAgent('kilo', 'SLEEP_9000 lock', worktreeCwd, 1, 10)
+    await new Promise(r => setTimeout(r, 500))
+
+    await assert.rejects(
+      () => runAgent('codex', 'test', worktreeCwd, 10, 10),
+      /already locked/
+    )
+
+    await slow.catch(() => {})
+  })
+})
