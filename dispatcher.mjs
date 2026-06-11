@@ -2,8 +2,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { spawn } from "child_process";
 import { z } from "zod";
+import { fileURLToPath } from "url";
 
-function spawnP(bin, args, opts) {
+const __filename = fileURLToPath(import.meta.url);
+const isMain = process.argv[1] === __filename;
+
+export function spawnP(bin, args, opts) {
   return new Promise((resolve, reject) => {
     const child = spawn(bin, args, {
       ...opts,
@@ -26,12 +30,12 @@ function spawnP(bin, args, opts) {
   });
 }
 
-const paramsSchema = {
+export const paramsSchema = {
   prompt: z.string().describe("The task for the agent to execute, e.g. 'write unit tests for src/auth.ts'"),
   cwd: z.string().optional().describe("Working directory for the agent. Pass the absolute path."),
 };
 
-const AGENTS = {
+export const AGENTS = {
   kilo: {
     label: "Kilo",
     bin: "kilocode",
@@ -49,16 +53,16 @@ const AGENTS = {
   },
 };
 
-function buildToolDescription(label, bin) {
+export function buildToolDescription(label, bin) {
   return `Delegate a task to ${label} (${bin}). Returns the agent's output. Use this for code generation, testing, refactoring, or review.`;
 }
 
-async function runAgent(agentKey, prompt, cwd) {
+export async function runAgent(agentKey, prompt, cwd, _spawn = spawnP) {
   const agent = AGENTS[agentKey];
   if (!agent) throw new Error(`Unknown agent: ${agentKey}`);
 
   try {
-    const { stdout, stderr } = await spawnP(agent.bin, agent.args(prompt), {
+    const { stdout, stderr } = await _spawn(agent.bin, agent.args(prompt), {
       cwd: cwd || process.cwd(),
       timeout: 300_000,
     });
@@ -96,5 +100,7 @@ for (const [key, agent] of Object.entries(AGENTS)) {
   );
 }
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+if (isMain) {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
