@@ -46,6 +46,7 @@ before(async () => {
     '#!/bin/bash',
     'case "$*" in',
     '  *TRAP_TERM*) trap \'\' TERM; exec sleep 9000 ;;',
+    '  *SELF_TERM*) kill -TERM $$ ;;',
     '  *SLEEP_9000*) exec sleep 9000 ;;',
     '  *FAIL_1*) echo "stderr fail" >&2; exit 1 ;;',
     '  *) echo "fake-kilo-ok" ;;',
@@ -304,5 +305,16 @@ describe('untracked file', () => {
     const parsed = JSON.parse(result)
     assert.ok(parsed.status_short.includes('newfile.txt'))
     await rm(join(worktreeCwd, 'newfile.txt'), { force: true })
+  })
+})
+
+describe('self-termination', () => {
+  it('reports terminated by SIGTERM with timed_out: false and exit_code: -1', async () => {
+    const result = await runAgent('kilo', 'SELF_TERM test', worktreeCwd, 30, 10)
+    const parsed = JSON.parse(result)
+    assert.strictEqual(parsed.agent, 'kilo')
+    assert.strictEqual(parsed.exit_code, -1)
+    assert.strictEqual(parsed.timed_out, false)
+    assert.ok(parsed.error.includes('terminated by SIGTERM'))
   })
 })

@@ -1,13 +1,13 @@
 # Agent Dispatcher — MCP-диспетчер для оркестрации AI-агентов
 
 MCP-сервер для делегирования задач CLI-агентам (Kilo, Codex). Принимает tool-call
-от оркестратора (Claude Code/Kilo), запускает агента в git worktree и возвращает
+от оркестратора (Claude Code), запускает агента в git worktree и возвращает
 структурированный JSON-отчёт.
 
 ## Как это работает
 
 ```
-Оркестратор (Claude Code / Kilo)
+Оркестратор (Claude Code)
    │  MCP tool call: delegate_kilo({ prompt, cwd, ... })
    ▼
 dispatch.mjs

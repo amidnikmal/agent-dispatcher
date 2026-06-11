@@ -138,10 +138,14 @@ function spawnP(bin, args, { cwd, timeoutSec }) {
     child.on('close', (code, signal) => {
       closed = true
       clearTimeout(killTimer)
-      const killed = timedOut || signal === 'SIGTERM' || signal === 'SIGKILL'
-      if (killed) {
+      if (timedOut) {
         const err = new Error('timeout')
         err.killed = true
+        err.stdout = stdout
+        err.stderr = stderr
+        reject(err)
+      } else if (signal) {
+        const err = new Error(`terminated by ${signal}`)
         err.stdout = stdout
         err.stderr = stderr
         reject(err)
