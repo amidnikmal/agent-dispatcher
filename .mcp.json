@@ -3,7 +3,8 @@
     "agent-dispatcher": {
       "type": "stdio",
       "command": "node",
-      "args": ["/home/dima/Desktop/orchestration/dispatcher.mjs"]
+      "args": ["/home/dima/Desktop/orchestration/dispatcher.mjs"],
+      "env": { "MAX_PARALLEL": "16" }
     }
   }
 }
