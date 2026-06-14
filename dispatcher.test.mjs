@@ -81,13 +81,22 @@ after(async () => {
 })
 
 describe('AGENTS registry', () => {
-  it('has exactly kilo and codex', () => {
+  it('has exactly kilo, codex and claude', () => {
     const keys = Object.keys(AGENTS).sort()
-    assert.deepStrictEqual(keys, ['codex', 'kilo'])
+    assert.deepStrictEqual(keys, ['claude', 'codex', 'kilo'])
   })
 
   it('codex uses codex-throne binary', () => {
     assert.strictEqual(AGENTS.codex.bin, CODEX)
+  })
+
+  it('claude uses claude binary headless with bypassPermissions', () => {
+    assert.strictEqual(AGENTS.claude.bin, 'claude')
+    const args = AGENTS.claude.args('test')
+    assert.ok(args.includes('-p'))
+    assert.ok(args.includes('--permission-mode'))
+    assert.ok(args.includes('bypassPermissions'))
+    assert.ok(args.includes('test'))
   })
 
   it('codex uses exec with --skip-git-repo-check', () => {
@@ -98,7 +107,11 @@ describe('AGENTS registry', () => {
 
   it('kilo uses kilocode binary with run subcommand', () => {
     assert.strictEqual(AGENTS.kilo.bin, KILO)
-    assert.deepStrictEqual(AGENTS.kilo.args('test'), ['run', 'test'])
+    const args = AGENTS.kilo.args('test')
+    assert.strictEqual(args[0], 'run')
+    assert.ok(args.includes('--model'))
+    assert.ok(args.includes('deepseek/deepseek-v4-pro'))
+    assert.strictEqual(args[args.length - 1], 'test')
   })
 
   it('each agent has label, bin, args function', () => {
@@ -275,14 +288,14 @@ describe('recursion guard', () => {
 })
 
 describe('tools/list integration', () => {
-  it('returns exactly delegate_kilo and delegate_codex', () => {
+  it('returns exactly delegate_kilo, delegate_codex and delegate_claude', () => {
     const output = execSync(
       `echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | node "${dispatcherPath}"`,
       { encoding: 'utf8', cwd: __dirname }
     )
     const response = JSON.parse(output.trim().split('\n').pop())
     const names = response.result.tools.map(t => t.name).sort()
-    assert.deepStrictEqual(names, ['delegate_codex', 'delegate_kilo'])
+    assert.deepStrictEqual(names, ['delegate_claude', 'delegate_codex', 'delegate_kilo'])
   })
 })
 

@@ -107,6 +107,42 @@ async function getDiffstat(cwd) {
   }
 }
 
+// Resolve the current HEAD sha so we can detect commits the agent makes during
+// its run. Agents that `git commit` leave a CLEAN working tree, so
+// getStatusShort/getDiffstat alone read as "(clean)"/"(no changes)" and look
+// like the agent did nothing — these helpers surface the committed work.
+async function getHead(cwd) {
+  try {
+    const { stdout } = await execFileP('git', ['rev-parse', 'HEAD'], { cwd })
+    return stdout.trim()
+  } catch {
+    return null
+  }
+}
+
+// Reports what the agent committed since `baseSha`: commit count, the new
+// commit subjects, and a diffstat of base..HEAD. Returns nulls when nothing
+// was committed (or HEAD is unavailable), so the orchestrator can tell apart
+// "committed and cleaned up" from "did nothing".
+async function getCommitsSince(cwd, baseSha) {
+  if (!baseSha) return { committed: 0, commit_log: null, committed_diffstat: null }
+  try {
+    const range = `${baseSha}..HEAD`
+    const { stdout: countOut } = await execFileP('git', ['rev-list', '--count', range], { cwd })
+    const committed = parseInt(countOut.trim(), 10) || 0
+    if (committed === 0) return { committed: 0, commit_log: null, committed_diffstat: null }
+    const { stdout: logOut } = await execFileP('git', ['log', '--oneline', range], { cwd })
+    const { stdout: statOut } = await execFileP('git', ['diff', range, '--stat'], { cwd })
+    return {
+      committed,
+      commit_log: logOut.trim() || null,
+      committed_diffstat: statOut.trim() || null,
+    }
+  } catch {
+    return { committed: 0, commit_log: null, committed_diffstat: null }
+  }
+}
+
 function spawnP(bin, args, { cwd, timeoutSec }) {
   return new Promise((resolve, reject) => {
     const child = spawn(bin, args, {
@@ -185,7 +221,7 @@ export const AGENTS = {
   kilo: {
     label: 'Kilo',
     bin: 'kilocode',
-    args: (prompt) => ['run', prompt],
+    args: (prompt) => ['run', '--model', 'deepseek/deepseek-v4-pro', prompt],
   },
   // codex-throne is a VPN wrapper over codex (not a different binary).
   // DO NOT replace 'codex-throne' with 'codex' — doing so will cause
@@ -194,6 +230,18 @@ export const AGENTS = {
     label: 'Codex',
     bin: 'codex-throne',
     args: (prompt) => ['exec', '--skip-git-repo-check', prompt],
+  },
+  // A separate Claude Code instance as a peer delegate. -p runs headless;
+  // bypassPermissions gives it the same autonomy as kilo/codex (it must edit
+  // files, run builds/tests and `git commit` in its worktree). This is required
+  // because spawnP closes stdin — any interactive permission prompt would
+  // otherwise hang until the timeout. Recursion is prevented by the
+  // AGENT_DISPATCHER_CHILD guard at the top of this file: a delegated Claude
+  // cannot start another agent-dispatcher server.
+  claude: {
+    label: 'Claude',
+    bin: 'claude',
+    args: (prompt) => ['-p', prompt, '--permission-mode', 'bypassPermissions'],
   },
 }
 
@@ -225,6 +273,10 @@ export async function runAgent(agentKey, prompt, cwd, timeoutSec, logTailLines) 
   const logFile = join(LOG_DIR, `${agentKey}-${ts}.log`)
   const start = Date.now()
 
+  // Snapshot HEAD before the run so committed work is visible afterwards even
+  // when the working tree is clean (see getCommitsSince).
+  const headBefore = await getHead(cwd)
+
   try {
     const branch = await getBranch(cwd)
     const { stdout, stderr } = await spawnP(agent.bin, agent.args(prompt), { cwd, timeoutSec })
@@ -232,6 +284,7 @@ export async function runAgent(agentKey, prompt, cwd, timeoutSec, logTailLines) 
 
     const statusShortPost = await getStatusShort(cwd)
     const diffstatPost = await getDiffstat(cwd)
+    const commits = await getCommitsSince(cwd, headBefore)
 
     await mkdir(LOG_DIR, { recursive: true })
     await writeFile(logFile, [
@@ -242,6 +295,8 @@ export async function runAgent(agentKey, prompt, cwd, timeoutSec, logTailLines) 
       `branch: ${branch}`,
       `exit_code: 0`,
       `duration_ms: ${durationMs}`,
+      `committed: ${commits.committed}`,
+      `commit_log: ${commits.commit_log || '(none)'}`,
       `--- stdout ---`,
       stdout || '(empty)',
       `--- stderr ---`,
@@ -255,6 +310,9 @@ export async function runAgent(agentKey, prompt, cwd, timeoutSec, logTailLines) 
       branch,
       status_short: statusShortPost,
       diffstat: diffstatPost,
+      committed: commits.committed,
+      commit_log: commits.commit_log,
+      committed_diffstat: commits.committed_diffstat,
       log_path: logFile,
       timed_out: false,
       error: null,
@@ -281,6 +339,8 @@ export async function runAgent(agentKey, prompt, cwd, timeoutSec, logTailLines) 
     const branch = await getBranch(cwd)
     const statusShortPost = await getStatusShort(cwd)
     const diffstatPost = await getDiffstat(cwd)
+    // Even on timeout/error the agent may have committed partial work.
+    const commits = await getCommitsSince(cwd, headBefore)
 
     await mkdir(LOG_DIR, { recursive: true })
     await writeFile(logFile, [
@@ -292,6 +352,8 @@ export async function runAgent(agentKey, prompt, cwd, timeoutSec, logTailLines) 
       `exit_code: ${timedOut ? 'timeout' : exitCode}`,
       `timed_out: ${timedOut}`,
       `error: ${errorMessage}`,
+      `committed: ${commits.committed}`,
+      `commit_log: ${commits.commit_log || '(none)'}`,
       `--- stdout ---`,
       stdout || '(empty)',
       `--- stderr ---`,
@@ -305,6 +367,9 @@ export async function runAgent(agentKey, prompt, cwd, timeoutSec, logTailLines) 
       branch,
       status_short: statusShortPost,
       diffstat: diffstatPost,
+      committed: commits.committed,
+      commit_log: commits.commit_log,
+      committed_diffstat: commits.committed_diffstat,
       log_path: logFile,
       timed_out: timedOut,
       error: errorMessage,
